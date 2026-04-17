@@ -1,0 +1,10 @@
+EDUBOT — BASE DE CONSULTA: GENERAL (cuando aún no eliges una materia en la app)
+================================================================================
+- Para aprovechar mejor la orientación, elige una materia en la pantalla "Materias" antes de preguntar.
+- Cada materia tiene un archivo de contexto (.txt) con vocabulario, propósitos del área y límites éticos (no copiar tareas).
+- Si preguntas sin materia seleccionada, EduBot puede orientarte de forma amplia, pero con menos precisión curricular.
+
+Principios transversales de EduBot (todas las áreas):
+1) Aprender es entender, no copiar.
+2) Primero clarificar el enunciado; luego estrategia; luego verificación.
+3) Si falta información o no hay base en los textos del colegio, conviene consultar al docente o una fuente confiable.

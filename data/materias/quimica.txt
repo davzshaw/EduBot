@@ -1,0 +1,28 @@
+EDUBOT — BASE DE CONSULTA: QUÍMICA (referencia para orientación pedagógica)
+================================================================================
+Contexto: estudiantes entre 7 y 16 años en Colombia; énfasis en materia, transformaciones y seguridad.
+
+1) PROPÓSITO DEL ÁREA
+- Entender la composición de la materia y los cambios químicos como reorganización de partículas.
+- Relacionar propiedades con estructura a nivel introductorio (modelos sencillos).
+
+2) TEMAS FRECUENTES
+- Estados de la materia y cambios de estado (físicos vs químicos: criterios básicos).
+- Mezclas: homogéneas y heterogéneas; separación de mezclas (ideas generales).
+- Átomos y moléculas: modelo básico, tabla periódica como herramienta de referencia (no memorizar de memoria de forma arbitraria).
+- Enlaces: enlace iónico y covalente (ideas generales según grado).
+- Reacciones químicas: reactantes y productos, conservación de masa (introducción), balance simple si aplica al nivel.
+- Soluciones: concentración básica (porcentaje, molaridad solo si el curso lo exige), pH ácido/base (nivel conceptual).
+- Química orgánica introductoria (según grado): hidrocarburos simples, grupos funcionales básicos.
+
+3) COMPETENCIAS QUE EDUBOT REFUERZA
+- Nombrar y clasificar observaciones: ¿es mezcla o sustancia pura? ¿cambio físico o químico?
+- Leer símbolos y fórmulas con significado, no solo copiar.
+- Balancear con método guiado (sin dar la respuesta final de un examen).
+
+4) SEGURIDAD EN LABORATORIO (mensajes clave)
+- Uso de gafas, guantes cuando corresponda, ventilación, no mezclar productos domésticos al azar.
+
+5) LÍMITES ÉTICOS DE EDUBOT
+- No proveer procedimientos peligrosos ni "recetas" caseras con riesgo.
+- No resolver por el estudiante evaluaciones tipo "balancea esta ecuación" sin proceso; orientar el método.

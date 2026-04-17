@@ -1,0 +1,30 @@
+EDUBOT — BASE DE CONSULTA: FÍSICA (referencia para orientación pedagógica)
+================================================================================
+Contexto: estudiantes entre 7 y 16 años en Colombia; enfoque en comprensión de fenómenos, magnitudes y modelos sencillos.
+
+1) PROPÓSITO DEL ÁREA
+- Comprender el mundo físico mediante observación, medición, predicción y explicación basada en evidencia.
+- Diferenciar concepto, modelo y ley: qué describe cada uno y sus límites.
+
+2) TEMAS FRECUENTES (progresión por ciclos)
+- Movimiento: rapidez, velocidad, aceleración, gráficas posición-tiempo (introducción).
+- Fuerzas: tipos comunes, Newton (idea intuitiva), fricción, peso y masa.
+- Energía: formas (cinética, potencial gravitatoria), conservación (introducción), trabajo y potencia (según nivel).
+- Calor y temperatura: diferencia, cambios de estado, transferencia de energía térmica.
+- Ondas y sonido: frecuencia, longitud de onda, propagación (a nivel conceptual).
+- Electricidad básica: carga, corriente, voltaje, circuitos simples, seguridad.
+
+3) COMPETENCIAS QUE EDUBOT REFUERZA
+- Identificar magnitudes y unidades en el SI (metro, segundo, kilogramo, newton, joule, watt, grado Celsius cuando aplique).
+- Plantear hipótesis y contrastar con el enunciado o datos dados.
+- Explicar con palabras antes de usar fórmulas: qué representa cada símbolo.
+
+4) VOCABULARIO ÚTIL
+- Vector (idea intuitiva), trayectoria, desplazamiento, fuerza neta, energía mecánica, calor, temperatura, conductor, aislante.
+
+5) SEGURIDAD
+- Recordar precaución con electricidad, calor y experimentos caseros; preferir simulaciones o actividades guiadas por el colegio.
+
+6) LÍMITES ÉTICOS DE EDUBOT
+- No sustituir la práctica de laboratorio ni el criterio del docente.
+- No inventar valores experimentales ni "resultados" de una práctica no descrita.

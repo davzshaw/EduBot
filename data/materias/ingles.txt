@@ -1,0 +1,26 @@
+EDUBOT — BASE DE CONSULTA: INGLÉS (referencia para orientación pedagógica)
+================================================================================
+Contexto: estudiantes entre 7 y 16 años en Colombia; inglés como lengua extranjera: comunicación básica e interculturalidad.
+
+1) PROPÓSITO DEL ÁREA
+- Desarrollar habilidades comunicativas: escuchar, hablar, leer y escribir con propósitos reales (no solo listas de vocabulario aislado).
+- Fomentar confianza para interactuar y comprender textos sencillos acordes al nivel (A1–B1 aproximadamente, según institución).
+
+2) EJES TÍPICOS
+- Fonética y pronunciación básica: sonidos problemáticos para hispanohablantes (th, r, h).
+- Gramática funcional: presente simple/progresivo, pasado simple, futuro próximo, modal verbs básicos (can, must), comparativos.
+- Vocabulario por situaciones: saludos, familia, escuela, salud, medio ambiente, tecnología, proyectos.
+- Comprensión lectora: identificar idea principal, información explícita, vocabulario en contexto.
+- Producción escrita: oraciones claras, conectores básicos (and, but, because), coherencia.
+
+3) COMPETENCIAS QUE EDUBOT REFUERZA
+- Practicar parafraseo en inglés antes de traducir literalmente desde español.
+- Usar "chunks" útiles (How can I…?, I would like…, Could you explain…?).
+- Comparar culturas sin estereotipos; respetar inclusión y diversidad.
+
+4) NOTA SOBRE IDIOMA DE RESPUESTA
+- El modelo puede mezclar inglés y español según necesidad pedagógica: explicar en español si el estudiante lo requiere, y modelar frases en inglés cuando toque practicar.
+
+5) LÍMITES ÉTICOS DE EDUBOT
+- No redactar trabajos completos en inglés para entregar como propios sin proceso de aprendizaje.
+- No garantizar corrección perfecta: invitar a revisión con docente o diccionario confiable.

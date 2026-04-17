@@ -1,0 +1,1663 @@
+EDUBOT — GUÍA STANDALONE PARA REPLICAR EL PROYECTO (texto plano)
+================================================================================
+Requisitos: Python 3.9+ (recomendado 3.10+), pip. Opcional: entorno virtual venv.
+
+1) CREAR CARPETAS (desde la carpeta donde quieras el proyecto)
+   Windows (PowerShell o CMD):
+     mkdir EduBot
+     cd EduBot
+     mkdir templates
+     mkdir static
+     mkdir static\css
+     mkdir static\js
+     mkdir data
+     mkdir data\materias
+
+   Linux / macOS:
+     mkdir -p EduBot/templates EduBot/static/css EduBot/static/js EduBot/data/materias
+     cd EduBot
+
+2) ARCHIVOS A CREAR (en la raíz del proyecto salvo rutas indicadas)
+   - requirements.txt
+   - app.py
+   - templates/edubot.html
+   - static/css/edubot.css
+   - static/js/edubot.js
+   - data/materias/general.txt
+   - data/materias/matematicas.txt
+   - data/materias/fisica.txt
+   - data/materias/quimica.txt
+   - data/materias/lengua.txt
+   - data/materias/ciencias_naturales.txt
+   - data/materias/ciencias_sociales.txt
+   - data/materias/ingles.txt
+
+3) INSTALACIÓN Y EJECUCIÓN
+     python -m venv venv
+     venv\Scripts\activate
+     pip install -r requirements.txt
+     python app.py
+   Abrir en el navegador: http://127.0.0.1:5000
+
+4) VARIABLES DE ENTORNO ÚTILES (opcional)
+   EDUBOT_USE_LLM=1              Activar modelo (Transformers); requiere pesos o SMOLLM2_LOCAL_PATH
+   EDUBOT_MAX_KB_CHARS=12000      Máximo de caracteres de los .txt inyectados en el prompt
+   SMOLLM2_LOCAL_PATH=ruta        Carpeta con modelo descargado manualmente
+   SMOLLM2_DISABLE_SSL_VERIFY=1   Solo redes con proxy SSL (menos seguro)
+   FLASK_SECRET_KEY=texto         En producción, cambiar
+   PORT=5000
+
+5) CONTENIDO EXACTO DE CADA ARCHIVO
+   Cada bloque está entre === INICIO: ruta === y === FIN: ruta ===
+   Copiar tal cual (UTF-8).
+
+================================================================================
+
+
+=== INICIO: requirements.txt ===
+flask>=3.0.0
+torch>=2.2.0
+transformers>=4.46.0
+accelerate>=0.34.0
+safetensors>=0.4.0
+=== FIN: requirements.txt ===
+
+=== INICIO: app.py ===
+"""
+EduBot — Flask: UI educativa + API de chat.
+
+- EDUBOT_USE_LLM=1: usa SmolLM2 (u otro) vía Transformers; requiere modelo descargado/accesible.
+- Por defecto (sin EDUBOT_USE_LLM): modo demostración sin cargar el modelo (útil en redes con firewall).
+
+Variables de modelo: SMOLLM2_MODEL, SMOLLM2_LOCAL_PATH, SMOLLM2_DISABLE_SSL_VERIFY, etc.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import threading
+from typing import Any
+
+from flask import Flask, jsonify, render_template, request, session
+
+os.environ.setdefault("TRANSFORMERS_NO_TORCHVISION", "1")
+
+
+def _maybe_disable_hf_ssl_verify() -> None:
+    flag = os.environ.get("HF_HUB_DISABLE_SSL_VERIFY", "").strip().lower()
+    alt = os.environ.get("SMOLLM2_DISABLE_SSL_VERIFY", "").strip().lower()
+    if flag in ("1", "true", "yes") or alt in ("1", "true", "yes"):
+        os.environ["HF_HUB_DISABLE_SSL_VERIFY"] = "1"
+
+
+_maybe_disable_hf_ssl_verify()
+
+app = Flask(__name__)
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-cambiar-en-produccion")
+
+USE_LLM = os.environ.get("EDUBOT_USE_LLM", "0").strip().lower() in ("1", "true", "yes")
+
+
+def _resolve_model_source() -> str:
+    local = os.environ.get("SMOLLM2_LOCAL_PATH", "").strip()
+    if local:
+        abs_local = os.path.abspath(local)
+        if os.path.isdir(abs_local):
+            return abs_local
+    return os.environ.get("SMOLLM2_MODEL", "HuggingFaceTB/SmolLM2-360M-Instruct")
+
+
+MODEL_SOURCE = _resolve_model_source()
+MAX_NEW_TOKENS = int(os.environ.get("MAX_NEW_TOKENS", "256"))
+MAX_HISTORY_MESSAGES = int(os.environ.get("MAX_HISTORY_MESSAGES", "20"))
+TEMPERATURE = float(os.environ.get("TEMPERATURE", "0.7"))
+TOP_P = float(os.environ.get("TOP_P", "0.9"))
+MAX_KB_CHARS = int(os.environ.get("EDUBOT_MAX_KB_CHARS", "12000"))
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MATERIAS_DIR = os.path.join(BASE_DIR, "data", "materias")
+
+# Nombre mostrado en la UI → archivo en data/materias/
+SUBJECT_TO_FILE = {
+    "Matemáticas": "matematicas.txt",
+    "Física": "fisica.txt",
+    "Química": "quimica.txt",
+    "Lengua": "lengua.txt",
+    "Ciencias Naturales": "ciencias_naturales.txt",
+    "Ciencias Sociales": "ciencias_sociales.txt",
+    "Inglés": "ingles.txt",
+}
+
+KB_BLOCK_HEADER = (
+    "\n\n--- Base de consulta del área (léela antes de responder; úsala para vocabulario, "
+    "enfoque y ejemplos. Si algo no aparece aquí, no inventes lineamientos oficiales: "
+    "orienta el razonamiento y sugiere consultar al docente o el material del colegio) ---\n"
+)
+
+_load_lock = threading.Lock()
+_model = None
+_tokenizer = None
+
+log = logging.getLogger(__name__)
+
+EDUBOT_SYSTEM_PROMPT = """Eres EduBot, asistente educativo para estudiantes de 7 a 16 años en Colombia (p. ej. Antioquia).
+Tu propósito es guiar el aprendizaje: explicar ideas paso a paso, hacer preguntas cortas para comprobar comprensión,
+y sugerir recursos o formas de estudiar. No des soluciones completas de tareas o ejercicios listas para copiar.
+Si piden la respuesta directa, orienta el razonamiento. Si no sabes, dilo con honestidad.
+Materia de contexto: {subject}. Responde en español, con tono claro, respetuoso y motivador."""
+
+
+def load_subject_kb(subject: str | None) -> tuple[str, str | None]:
+    """Lee el .txt de la materia (o general.txt si no hay materia). Devuelve (texto, nombre de archivo)."""
+    if subject and subject in SUBJECT_TO_FILE:
+        fn = SUBJECT_TO_FILE[subject]
+        path = os.path.join(MATERIAS_DIR, fn)
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8") as f:
+                return f.read(), fn
+        log.warning("Falta el archivo de materia: %s", path)
+        return "", None
+    path_general = os.path.join(MATERIAS_DIR, "general.txt")
+    if os.path.isfile(path_general):
+        with open(path_general, encoding="utf-8") as f:
+            return f.read(), "general.txt"
+    return "", None
+
+
+def build_system_prompt(subject: str | None) -> str:
+    """Prompt de sistema + base .txt truncada para el modelo."""
+    subj_label = subject or "general (sin materia elegida en la app)"
+    base = EDUBOT_SYSTEM_PROMPT.format(subject=subj_label)
+    kb, _fname = load_subject_kb(subject)
+    if not kb.strip():
+        return base
+    text = kb
+    if len(text) > MAX_KB_CHARS:
+        text = (
+            text[:MAX_KB_CHARS]
+            + "\n... [texto truncado por EDUBOT_MAX_KB_CHARS="
+            + str(MAX_KB_CHARS)
+            + "]\n"
+        )
+    return base + KB_BLOCK_HEADER + text
+
+
+def _trim_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if len(messages) <= MAX_HISTORY_MESSAGES:
+        return messages
+    return messages[-MAX_HISTORY_MESSAGES:]
+
+
+def get_model_and_tokenizer():
+    global _model, _tokenizer
+    with _load_lock:
+        if _model is not None and _tokenizer is not None:
+            return _model, _tokenizer
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        log.info("Cargando modelo %s (primera vez puede descargar pesos)...", MODEL_SOURCE)
+        tok = AutoTokenizer.from_pretrained(MODEL_SOURCE, trust_remote_code=True)
+        dtype = torch.float32
+        if torch.cuda.is_available():
+            dtype = torch.float16
+        m = AutoModelForCausalLM.from_pretrained(
+            MODEL_SOURCE,
+            trust_remote_code=True,
+            torch_dtype=dtype,
+            device_map="auto" if torch.cuda.is_available() else None,
+        )
+        if not torch.cuda.is_available():
+            m = m.to("cpu")
+        m.eval()
+        _tokenizer = tok
+        _model = m
+        log.info("Modelo listo.")
+        return _model, _tokenizer
+
+
+def _mock_edubot_reply(user_text: str, subject: str | None) -> str:
+    """Respuesta pedagógica cuando no hay LLM; invita al razonamiento sin resolver la tarea."""
+    subj = subject or "tus materias"
+    kb, kb_name = load_subject_kb(subject)
+    kb_excerpt = ""
+    if kb_name and kb.strip():
+        n = 900
+        kb_excerpt = (
+            f"\n\n--- Extracto de la base cargada ({kb_name}, {len(kb)} caracteres) ---\n"
+            f"{kb[:n]}{'…' if len(kb) > n else ''}\n"
+            "(Con EDUBOT_USE_LLM=1 el modelo recibe el texto completo en el prompt de sistema.)\n"
+        )
+    return (
+        "En este equipo EduBot está en modo demostración (sin modelo de IA cargado). "
+        "Cuando tengas el modelo en otro PC, define la variable de entorno EDUBOT_USE_LLM=1.\n\n"
+        f"Para ayudarte en {subj} sin darte la respuesta lista para copiar: "
+        "¿qué parte del concepto ya entiendes y en qué punto te atoras? "
+        "Si me dices qué intentaste (aunque no te haya salido), te guío con el siguiente paso "
+        "y preguntas para que lo descubras tú."
+        f"{kb_excerpt}\n"
+        f"Tu mensaje fue: «{user_text[:400]}{'…' if len(user_text) > 400 else ''}»"
+    )
+
+
+@app.route("/")
+def index():
+    return render_template(
+        "edubot.html",
+        use_llm=USE_LLM,
+        model_id=MODEL_SOURCE,
+    )
+
+
+@app.route("/api/status", methods=["GET"])
+def api_status():
+    sub = session.get("subject")
+    kb, kb_file = load_subject_kb(sub)
+    return jsonify(
+        {
+            "use_llm": USE_LLM,
+            "model": MODEL_SOURCE if USE_LLM else None,
+            "subject": sub,
+            "kb_file": kb_file,
+            "kb_chars": len(kb),
+        }
+    )
+
+
+@app.route("/api/session/subject", methods=["POST"])
+def api_session_subject():
+    data = request.get_json(silent=True) or {}
+    subj = (data.get("subject") or "").strip() or None
+    session["subject"] = subj
+    return jsonify({"ok": True, "subject": subj})
+
+
+@app.route("/api/chat", methods=["POST"])
+def chat():
+    data = request.get_json(silent=True) or {}
+    user_text = (data.get("message") or "").strip()
+    if not user_text:
+        return jsonify({"error": "Mensaje vacío."}), 400
+
+    if "subject" in data and data.get("subject") is not None:
+        s = (data.get("subject") or "").strip() or None
+        session["subject"] = s
+
+    subject = session.get("subject")
+    kb_text, kb_file = load_subject_kb(subject)
+
+    messages = list(session.get("messages", []))
+    messages.append({"role": "user", "content": user_text})
+    messages = _trim_history(messages)
+    session["messages"] = messages
+
+    if not USE_LLM:
+        reply = _mock_edubot_reply(user_text, subject)
+        messages.append({"role": "assistant", "content": reply})
+        session["messages"] = _trim_history(messages)
+        return jsonify(
+            {
+                "reply": reply,
+                "mode": "mock",
+                "subject": subject,
+                "kb_file": kb_file,
+                "kb_chars": len(kb_text),
+            }
+        )
+
+    try:
+        model, tokenizer = get_model_and_tokenizer()
+    except Exception as e:
+        log.exception("Fallo al cargar el modelo")
+        return jsonify({"error": f"No se pudo cargar el modelo: {e!s}"}), 500
+
+    import torch
+
+    messages_for_model: list[dict[str, Any]] = [
+        {
+            "role": "system",
+            "content": build_system_prompt(subject),
+        },
+        *list(session.get("messages", [])),
+    ]
+
+    try:
+        prompt_ids = tokenizer.apply_chat_template(
+            messages_for_model,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_tensors="pt",
+        )
+    except Exception as e:
+        return jsonify({"error": f"Chat template: {e!s}"}), 500
+
+    device = next(model.parameters()).device
+    prompt_ids = prompt_ids.to(device)
+
+    pad_id = tokenizer.pad_token_id
+    if pad_id is None:
+        pad_id = tokenizer.eos_token_id
+
+    with torch.no_grad():
+        out = model.generate(
+            prompt_ids,
+            max_new_tokens=MAX_NEW_TOKENS,
+            do_sample=True,
+            temperature=TEMPERATURE,
+            top_p=TOP_P,
+            pad_token_id=pad_id,
+            eos_token_id=tokenizer.eos_token_id,
+        )
+
+    generated = out[0][prompt_ids.shape[-1] :]
+    reply = tokenizer.decode(generated, skip_special_tokens=True).strip()
+
+    messages.append({"role": "assistant", "content": reply})
+    session["messages"] = _trim_history(messages)
+
+    return jsonify(
+        {
+            "reply": reply,
+            "mode": "llm",
+            "model": MODEL_SOURCE,
+            "max_new_tokens": MAX_NEW_TOKENS,
+            "subject": subject,
+            "kb_file": kb_file,
+            "kb_chars": len(kb_text),
+        }
+    )
+
+
+@app.route("/api/reset", methods=["POST"])
+def reset():
+    session.pop("messages", None)
+    return jsonify({"ok": True})
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    port = int(os.environ.get("PORT", "5000"))
+    app.run(host="127.0.0.1", port=port, debug=False)
+=== FIN: app.py ===
+
+=== INICIO: templates/edubot.html ===
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>EduBot — Apprende</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,600;0,9..40,700;1,9..40,400&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/edubot.css') }}" />
+</head>
+<body>
+  <div class="app-frame">
+    <div class="brand-strip" aria-hidden="true"></div>
+    <div id="badge-demo" class="badge-demo" {% if use_llm %}style="display:none"{% endif %}>
+      Modo demostración: sin modelo de IA en este equipo. En otro PC usa EDUBOT_USE_LLM=1.
+    </div>
+
+    <!-- Inicio -->
+    <section id="view-home" class="view is-active" aria-label="Inicio">
+      <header class="home-header">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" stroke="#d21f26" stroke-width="2" stroke-linecap="round"/>
+          <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" stroke="#d21f26" stroke-width="2" stroke-linecap="round"/>
+          <path d="M8 7h8M8 11h6" stroke="#009ba4" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+        <h1>EduBot — Apprende</h1>
+      </header>
+
+      <div class="hero-card">
+        <p>Aprender es entender, <span class="accent">no copiar</span>.</p>
+      </div>
+
+      <h2 class="section-title">
+        <span aria-hidden="true">ⓘ</span> ¿Qué es EduBot?
+      </h2>
+      <p class="section-body">
+        Es tu guía de estudio personal diseñada para acompañarte en tus tareas escolares.
+      </p>
+      <p class="section-body">
+        EduBot no solo te da respuestas: te ayuda a comprender paso a paso cada tema para que el conocimiento se quede contigo.
+      </p>
+
+      <div class="feature-grid">
+        <div class="feature-card mint">
+          <div class="f-icon mint" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+          </div>
+          <div>
+            <strong>Fácil de usar</strong>
+            <span>Funciona incluso con poca conexión</span>
+          </div>
+        </div>
+        <div class="feature-card blue">
+          <div class="f-icon blue" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M22 10v6M2 10l10-5 10 5-10 5-10-5z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M6 12v5c0 2 2 3 6 3s6-1 6-3v-5" stroke="currentColor" stroke-width="2"/></svg>
+          </div>
+          <div>
+            <strong>Tu profesor 24/7</strong>
+            <span>Pregunta lo que quieras, cuando quieras</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Chat -->
+    <section id="view-chat" class="view chat-screen" aria-label="Chat">
+      <div class="chat-top">
+        <div class="avatar" aria-hidden="true">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none">
+            <rect x="5" y="7" width="14" height="10" rx="2" stroke="#003366" stroke-width="2"/>
+            <circle cx="9.5" cy="11.5" r="1.2" fill="#009ba4"/>
+            <circle cx="14.5" cy="11.5" r="1.2" fill="#009ba4"/>
+            <path d="M9 15h6" stroke="#003366" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          <span class="dot" title="En línea"></span>
+        </div>
+        <div class="chat-title">
+          <h2>EduBot</h2>
+          <p>Asistente de Aprendizaje</p>
+        </div>
+        <button type="button" class="info-btn" data-open-info title="Información">i</button>
+      </div>
+      <div id="subject-label" class="chat-subject-pill" style="display:none"></div>
+      <div style="display:flex;justify-content:flex-end;padding:0 1rem 0.35rem">
+        <button type="button" id="btn-reset-chat" style="font-size:0.75rem;background:none;border:none;color:#808285;cursor:pointer;text-decoration:underline">
+          Limpiar conversación
+        </button>
+      </div>
+      <div class="chat-area" id="chat-wrap">
+        <div class="date-pill"><span>HOY</span></div>
+        <div id="chat-log" class="chat-log-inner"></div>
+      </div>
+      <form id="chat-form" class="chat-input-bar" autocomplete="off">
+        <button type="button" class="plus-btn" title="Próximamente" disabled>+</button>
+        <div class="chat-input-wrap">
+          <input type="text" id="chat-input" name="m" placeholder="Escribe tu duda aquí…" maxlength="4000" />
+          <span class="kbd-hint" aria-hidden="true">⌨</span>
+        </div>
+        <button type="submit" class="send-btn" id="btn-send" title="Enviar" aria-label="Enviar">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+        </button>
+      </form>
+    </section>
+
+    <!-- Materias -->
+    <section id="view-subjects" class="view" aria-label="Materias">
+      <div class="subjects-head">
+        <h2>Materias</h2>
+        <p class="q">¿Qué quieres estudiar hoy?</p>
+        <p class="hint">Elige una materia para chatear con EduBot</p>
+      </div>
+      <div class="subject-list">
+        <button type="button" class="subject-card" data-subject="Matemáticas">
+          <span class="sc-icon b1" aria-hidden="true">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none"><rect x="4" y="4" width="16" height="16" rx="2" stroke="currentColor" stroke-width="2"/><path d="M8 8h2v2H8V8zm6 0h2v2h-2V8zM8 14h2v2H8v-2zm6 0h2v2h-2v-2z" fill="currentColor"/></svg>
+          </span>
+          <span class="sc-text"><strong>Matemáticas</strong><span>Iniciar chat de Matemáticas</span></span>
+          <span class="sc-chev" aria-hidden="true">›</span>
+        </button>
+        <button type="button" class="subject-card" data-subject="Física">
+          <span class="sc-icon b2" aria-hidden="true">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+          </span>
+          <span class="sc-text"><strong>Física</strong><span>Iniciar chat de Física</span></span>
+          <span class="sc-chev" aria-hidden="true">›</span>
+        </button>
+        <button type="button" class="subject-card" data-subject="Química">
+          <span class="sc-icon b3" aria-hidden="true">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M9 3h6v4l4 11a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2l4-11V3z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+          </span>
+          <span class="sc-text"><strong>Química</strong><span>Iniciar chat de Química</span></span>
+          <span class="sc-chev" aria-hidden="true">›</span>
+        </button>
+        <button type="button" class="subject-card" data-subject="Lengua">
+          <span class="sc-icon b4" aria-hidden="true">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" stroke="currentColor" stroke-width="2"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" stroke="currentColor" stroke-width="2"/></svg>
+          </span>
+          <span class="sc-text"><strong>Lengua</strong><span>Iniciar chat de Lengua</span></span>
+          <span class="sc-chev" aria-hidden="true">›</span>
+        </button>
+        <button type="button" class="subject-card" data-subject="Ciencias Naturales">
+          <span class="sc-icon b5" aria-hidden="true">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M12 22c4-4 8-8 8-12a8 8 0 1 0-16 0c0 4 4 8 8 12z" stroke="currentColor" stroke-width="2"/><path d="M12 6v6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          </span>
+          <span class="sc-text"><strong>Ciencias Naturales</strong><span>Iniciar chat de Ciencias Naturales</span></span>
+          <span class="sc-chev" aria-hidden="true">›</span>
+        </button>
+        <button type="button" class="subject-card" data-subject="Ciencias Sociales">
+          <span class="sc-icon b6" aria-hidden="true">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/><path d="M2 12h20M12 2a15 15 0 0 0 0 20M12 2a15 15 0 0 1 0 20" stroke="currentColor" stroke-width="2"/></svg>
+          </span>
+          <span class="sc-text"><strong>Ciencias Sociales</strong><span>Iniciar chat de Ciencias Sociales</span></span>
+          <span class="sc-chev" aria-hidden="true">›</span>
+        </button>
+        <button type="button" class="subject-card" data-subject="Inglés">
+          <span class="sc-icon b7" aria-hidden="true">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M4 7h16M4 12h10M4 17h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          </span>
+          <span class="sc-text"><strong>Inglés</strong><span>Iniciar chat de Inglés</span></span>
+          <span class="sc-chev" aria-hidden="true">›</span>
+        </button>
+      </div>
+    </section>
+
+    <!-- Nav inferior -->
+    <nav class="bottom-nav" aria-label="Navegación principal">
+      <button type="button" class="nav-item is-active" data-nav="home">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9.5L12 3l9 6.5V20a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1V9.5z"/></svg>
+        Inicio
+      </button>
+      <button type="button" class="nav-item" data-nav="chat">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a8 8 0 0 1-8 8H8l-5 3v-3H5a8 8 0 1 1 16 0z"/></svg>
+        Chat
+      </button>
+      <button type="button" class="nav-item" data-nav="subjects">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+        Materias
+      </button>
+    </nav>
+  </div>
+
+  <!-- Modal información -->
+  <div id="info-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="info-title">
+    <div class="modal-sheet">
+      <h3 id="info-title">EduBot — propósito</h3>
+      <p>
+        EduBot orienta el aprendizaje en zonas rurales de Antioquia: explica conceptos, guía paso a paso
+        y sugiere qué reforzar, sin reemplazar al docente ni fomentar la copia de tareas.
+      </p>
+      <p>
+        En este entorno puedes probar la interfaz. Para respuestas generadas por el modelo SmolLM2 en tu equipo,
+        configura el modelo y define <code>EDUBOT_USE_LLM=1</code>.
+      </p>
+      <p style="font-size:0.8rem;color:#808285;margin:0;">
+        Modelo configurado en servidor: <code>{{ model_id }}</code>
+      </p>
+      <button type="button" class="modal-close" id="modal-close">Cerrar</button>
+    </div>
+  </div>
+
+  <script src="{{ url_for('static', filename='js/edubot.js') }}"></script>
+</body>
+</html>
+=== FIN: templates/edubot.html ===
+
+=== INICIO: static/css/edubot.css ===
+/* EduBot — paleta inspirada en Universidad de Medellín (rojo, teal, gris, azul oscuro) */
+
+:root {
+  --bg: #ffffff;
+  --bg-subtle: #f7f8fa;
+  --bg-chat: #f2f7f8;
+  --text: #003366;
+  --text-muted: #808285;
+  --primary: #d21f26;
+  --primary-dark: #b01820;
+  --primary-soft: #fce8e9;
+  --teal: #009ba4;
+  --teal-soft: #e0f5f6;
+  --teal-dark: #007a82;
+  --navy: #003366;
+  --gold: #ffd700;
+  --sky: #d9eef0;
+  --sky-card: #e8f5f6;
+  --border: #e0e4e8;
+  --user-bubble: #e0f5f6;
+  --nav-active: #d21f26;
+  --shadow: 0 4px 14px rgba(0, 51, 102, 0.08);
+  --radius: 14px;
+  --font: "DM Sans", "Segoe UI", system-ui, sans-serif;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  font-family: var(--font);
+  background: var(--bg-subtle);
+  color: var(--text);
+}
+
+a {
+  color: var(--primary);
+}
+
+.app-frame {
+  max-width: 430px;
+  margin: 0 auto;
+  min-height: 100vh;
+  background: var(--bg);
+  position: relative;
+  padding-bottom: 88px;
+  box-shadow: 0 0 0 1px var(--border);
+}
+
+/* Franja superior: rojo institucional + teal (identidad UdeMedellín) */
+.brand-strip {
+  height: 4px;
+  background: linear-gradient(90deg, var(--primary) 0%, var(--primary) 50%, var(--teal) 50%, var(--teal) 100%);
+}
+
+.view {
+  display: none;
+  padding: 1rem 1rem 0.5rem;
+  animation: fadeIn 0.2s ease;
+}
+
+.view.is-active {
+  display: block;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* ——— Home ——— */
+.home-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.home-header h1 {
+  font-size: 1.05rem;
+  font-weight: 700;
+  margin: 0;
+  color: var(--primary);
+}
+
+.hero-card {
+  background: var(--sky-card);
+  border-radius: var(--radius);
+  padding: 1.1rem 1rem;
+  margin-bottom: 1.25rem;
+  box-shadow: var(--shadow);
+}
+
+.hero-card p {
+  margin: 0;
+  font-size: 1.05rem;
+  line-height: 1.45;
+  font-weight: 600;
+}
+
+.hero-card .accent {
+  color: var(--teal);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.section-title {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 1rem;
+  font-weight: 700;
+  margin: 0 0 0.5rem;
+}
+
+.section-body {
+  font-size: 0.9rem;
+  line-height: 1.55;
+  color: var(--text);
+  margin: 0 0 0.75rem;
+}
+
+.feature-grid {
+  display: grid;
+  gap: 0.65rem;
+  margin-top: 1rem;
+}
+
+.feature-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  padding: 0.85rem 0.9rem;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.feature-card.mint {
+  background: var(--teal-soft);
+}
+
+.feature-card.blue {
+  background: #e8ecf5;
+}
+
+.feature-card strong {
+  display: block;
+  font-size: 0.92rem;
+  margin-bottom: 0.15rem;
+}
+
+.feature-card span {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.f-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+
+.f-icon.mint {
+  background: #b8e8eb;
+  color: var(--teal-dark);
+}
+
+.f-icon.blue {
+  background: #f5d6d8;
+  color: var(--primary);
+}
+
+/* ——— Subjects ——— */
+.subjects-head h2 {
+  margin: 0 0 0.25rem;
+  font-size: 1.35rem;
+}
+
+.subjects-head .q {
+  font-weight: 700;
+  font-size: 0.95rem;
+  margin: 0 0 0.35rem;
+}
+
+.subjects-head .hint {
+  margin: 0 0 1rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.subject-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.subject-card {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.85rem 0.75rem;
+  background: #fff;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  border: none;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.subject-card:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(0, 51, 102, 0.12);
+}
+
+.subject-card:active {
+  transform: translateY(0);
+}
+
+.sc-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  color: #fff;
+}
+
+.sc-icon.b1 {
+  background: #d21f26;
+}
+.sc-icon.b2 {
+  background: #009ba4;
+}
+.sc-icon.b3 {
+  background: #003366;
+}
+.sc-icon.b4 {
+  background: #e6b800;
+  color: #003366;
+}
+.sc-icon.b5 {
+  background: #007a82;
+}
+.sc-icon.b6 {
+  background: #808285;
+}
+.sc-icon.b7 {
+  background: #00b4c0;
+}
+
+.sc-text strong {
+  display: block;
+  font-size: 0.95rem;
+}
+
+.sc-text span {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.sc-chev {
+  margin-left: auto;
+  color: #cbd5e1;
+  font-size: 1.2rem;
+}
+
+/* ——— Chat ——— */
+.chat-screen {
+  padding: 0;
+}
+
+.chat-top {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.75rem 1rem;
+  background: #fff;
+  border-bottom: 1px solid var(--border);
+}
+
+.avatar {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: linear-gradient(145deg, #fce8e9, #e0f5f6);
+  display: grid;
+  place-items: center;
+  position: relative;
+  flex-shrink: 0;
+}
+
+.avatar .dot {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background: #009ba4;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  right: 0;
+  bottom: 0;
+}
+
+.chat-title h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.chat-title p {
+  margin: 0.1rem 0 0;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.info-btn {
+  margin-left: auto;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: none;
+  background: var(--primary);
+  color: #fff;
+  font-weight: 700;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+}
+
+.chat-subject-pill {
+  margin: 0.5rem 1rem 0;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.chat-subject-pill span {
+  display: inline-block;
+  background: var(--teal-soft);
+  color: var(--teal-dark);
+  border: 1px solid rgba(0, 155, 164, 0.35);
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  font-weight: 600;
+}
+
+.chat-area {
+  min-height: 52vh;
+  max-height: calc(100vh - 220px);
+  overflow: auto;
+  padding: 0.75rem 1rem 1rem;
+  background-color: var(--bg-chat);
+  background-image: radial-gradient(rgba(0, 155, 164, 0.2) 1px, transparent 1px);
+  background-size: 12px 12px;
+}
+
+.date-pill {
+  text-align: center;
+  margin: 0.25rem 0 0.75rem;
+}
+
+.date-pill span {
+  display: inline-block;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  background: #e8ecf1;
+  padding: 0.25rem 0.75rem;
+  border-radius: 999px;
+}
+
+.msg-row {
+  display: flex;
+  margin-bottom: 0.65rem;
+}
+
+.msg-row.bot {
+  justify-content: flex-start;
+}
+
+.msg-row.user {
+  justify-content: flex-end;
+}
+
+.bubble {
+  max-width: 88%;
+  padding: 0.65rem 0.85rem;
+  border-radius: 14px;
+  font-size: 0.88rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.bubble.bot {
+  background: #fff;
+  box-shadow: var(--shadow);
+}
+
+.bubble.user {
+  background: var(--user-bubble);
+  color: var(--text);
+}
+
+.msg-meta {
+  display: block;
+  margin-top: 0.35rem;
+  font-size: 0.68rem;
+  color: var(--text-muted);
+}
+
+.msg-meta.user {
+  text-align: right;
+}
+
+.checks {
+  color: var(--teal);
+  margin-left: 0.25rem;
+}
+
+.chat-input-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.5rem 0.75rem 0.65rem;
+  background: #fff;
+  border-top: 1px solid var(--border);
+}
+
+.plus-btn {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  border: none;
+  background: transparent;
+  color: var(--teal);
+  font-size: 1.4rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.chat-input-wrap {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.35rem 0.85rem;
+  gap: 0.35rem;
+}
+
+.chat-input-wrap input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  font: inherit;
+  font-size: 0.88rem;
+  min-width: 0;
+}
+
+.chat-input-wrap input:focus {
+  outline: none;
+}
+
+.chat-input-wrap .kbd-hint {
+  font-size: 0.85rem;
+  opacity: 0.45;
+}
+
+.send-btn {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  border: none;
+  background: var(--primary);
+  color: #fff;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+
+.send-btn:disabled,
+.plus-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Pending */
+.pending-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  max-width: 88%;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid #cbd5e1;
+  border-top-color: var(--teal);
+  border-radius: 50%;
+  animation: spin 0.65s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Bottom nav */
+.bottom-nav {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 0;
+  width: 100%;
+  max-width: 430px;
+  background: #fff;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: space-around;
+  padding: 0.45rem 0 calc(0.45rem + env(safe-area-inset-bottom));
+  z-index: 20;
+}
+
+.nav-item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+  padding: 0.35rem;
+  border: none;
+  background: none;
+  font: inherit;
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.nav-item svg {
+  width: 22px;
+  height: 22px;
+}
+
+.nav-item.is-active {
+  color: var(--nav-active);
+  font-weight: 700;
+}
+
+.nav-item.is-active svg {
+  stroke: var(--nav-active);
+}
+
+.badge-demo {
+  font-size: 0.72rem;
+  background: #fff5f5;
+  color: #b01820;
+  border: 1px solid rgba(210, 31, 38, 0.25);
+  padding: 0.35rem 0.6rem;
+  border-radius: 8px;
+  margin: 0 1rem 0.75rem;
+}
+
+/* Modal info */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  display: none;
+  align-items: flex-end;
+  justify-content: center;
+  z-index: 50;
+  padding: 1rem;
+}
+
+.modal-overlay.is-open {
+  display: flex;
+}
+
+.modal-sheet {
+  background: #fff;
+  border-radius: 16px 16px 0 0;
+  max-width: 430px;
+  width: 100%;
+  padding: 1rem 1rem 1.25rem;
+  max-height: 70vh;
+  overflow: auto;
+}
+
+.modal-sheet h3 {
+  margin: 0 0 0.5rem;
+}
+
+.modal-sheet p {
+  margin: 0 0 0.65rem;
+  font-size: 0.88rem;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.modal-close {
+  margin-top: 0.5rem;
+  width: 100%;
+  padding: 0.6rem;
+  border-radius: 10px;
+  border: none;
+  background: var(--primary);
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+}
+=== FIN: static/css/edubot.css ===
+
+=== INICIO: static/js/edubot.js ===
+(function () {
+  const views = {
+    home: document.getElementById("view-home"),
+    chat: document.getElementById("view-chat"),
+    subjects: document.getElementById("view-subjects"),
+  };
+
+  const navBtns = document.querySelectorAll("[data-nav]");
+  const chatLog = document.getElementById("chat-log");
+  const chatForm = document.getElementById("chat-form");
+  const chatInput = document.getElementById("chat-input");
+  const sendBtn = document.getElementById("btn-send");
+  const resetChatBtn = document.getElementById("btn-reset-chat");
+  const subjectLabel = document.getElementById("subject-label");
+  const badgeDemo = document.getElementById("badge-demo");
+  const modal = document.getElementById("info-modal");
+  const modalOpeners = document.querySelectorAll("[data-open-info]");
+  const modalClose = document.getElementById("modal-close");
+
+  let currentSubject = null;
+
+  function showView(name) {
+    Object.keys(views).forEach((k) => {
+      views[k].classList.toggle("is-active", k === name);
+    });
+    navBtns.forEach((b) => {
+      b.classList.toggle("is-active", b.getAttribute("data-nav") === name);
+    });
+    if (name === "chat") {
+      ensureWelcome();
+    }
+  }
+
+  function fmtTime(d) {
+    return d.toLocaleTimeString("es-CO", { hour: "2-digit", minute: "2-digit" });
+  }
+
+  function appendBubble(role, text, extraMeta) {
+    const row = document.createElement("div");
+    row.className = "msg-row " + (role === "user" ? "user" : "bot");
+    const bubble = document.createElement("div");
+    bubble.className = "bubble " + (role === "user" ? "user" : "bot");
+
+    const body = document.createElement("div");
+    body.style.margin = "0";
+    body.textContent = text;
+    bubble.appendChild(body);
+
+    const meta = document.createElement("span");
+    meta.className = "msg-meta " + (role === "user" ? "user" : "");
+    const t = fmtTime(new Date());
+    if (role === "user") {
+      meta.innerHTML =
+        t + '<span class="checks" aria-hidden="true"> ✓✓</span>';
+    } else {
+      meta.textContent = t + (extraMeta ? " · " + extraMeta : "");
+    }
+    bubble.appendChild(meta);
+    row.appendChild(bubble);
+    chatLog.appendChild(row);
+    chatLog.scrollTop = chatLog.scrollHeight;
+  }
+
+  function showPending() {
+    const row = document.createElement("div");
+    row.className = "msg-row bot";
+    row.id = "pending-row";
+    const inner = document.createElement("div");
+    inner.className = "pending-row";
+    inner.setAttribute("role", "status");
+    inner.innerHTML =
+      '<span class="spinner" aria-hidden="true"></span> EduBot está pensando…';
+    row.appendChild(inner);
+    chatLog.appendChild(row);
+    chatLog.scrollTop = chatLog.scrollHeight;
+  }
+
+  function removePending() {
+    document.getElementById("pending-row")?.remove();
+  }
+
+  function setBusy(busy) {
+    sendBtn.disabled = busy;
+    chatInput.disabled = busy;
+    if (resetChatBtn) resetChatBtn.disabled = busy;
+  }
+
+  function ensureWelcome() {
+    if (chatLog.querySelector(".msg-row")) return;
+    const pill = document.querySelector(".date-pill");
+    if (pill) pill.style.display = "block";
+    appendBubble(
+      "bot",
+      "¡Hola! Soy EduBot. Estoy aquí para orientarte en tus dudas de estudio (sin darte la tarea hecha). ¿En qué te puedo ayudar a aprender hoy?"
+    );
+  }
+
+  async function refreshStatus() {
+    try {
+      const r = await fetch("/api/status");
+      const data = await r.json();
+      if (badgeDemo) {
+        badgeDemo.style.display = data.use_llm ? "none" : "block";
+      }
+      if (data.subject) {
+        currentSubject = data.subject;
+        updateSubjectUi();
+      }
+    } catch (_) {
+      /* silencio */
+    }
+  }
+
+  function updateSubjectUi() {
+    if (!subjectLabel) return;
+    if (currentSubject) {
+      subjectLabel.innerHTML =
+        '<span>Materia: ' + escapeHtml(currentSubject) + "</span>";
+      subjectLabel.style.display = "block";
+    } else {
+      subjectLabel.textContent = "";
+      subjectLabel.style.display = "none";
+    }
+  }
+
+  function escapeHtml(s) {
+    const d = document.createElement("div");
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  navBtns.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      showView(btn.getAttribute("data-nav"));
+    });
+  });
+
+  chatForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const text = chatInput.value.trim();
+    if (!text) return;
+    chatInput.value = "";
+    appendBubble("user", text);
+    showPending();
+    setBusy(true);
+    try {
+      const r = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: text, subject: currentSubject }),
+      });
+      const data = await r.json();
+      removePending();
+      if (!r.ok) {
+        appendBubble("bot", data.error || "No se pudo obtener respuesta.");
+      } else {
+        appendBubble("bot", data.reply, data.mode === "mock" ? "demo" : "");
+      }
+    } catch (err) {
+      removePending();
+      appendBubble("bot", "Error de red: " + String(err));
+    }
+    setBusy(false);
+    chatInput.focus();
+  });
+
+  document.querySelectorAll("[data-subject]").forEach((el) => {
+    el.addEventListener("click", async () => {
+      const subj = el.getAttribute("data-subject") || "";
+      currentSubject = subj;
+      try {
+        await fetch("/api/session/subject", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ subject: subj }),
+        });
+      } catch (_) {}
+      updateSubjectUi();
+      showView("chat");
+      chatInput.focus();
+    });
+  });
+
+  if (resetChatBtn) {
+    resetChatBtn.addEventListener("click", async () => {
+      await fetch("/api/reset", { method: "POST" });
+      chatLog.innerHTML = "";
+      ensureWelcome();
+    });
+  }
+
+  function openModal() {
+    modal.classList.add("is-open");
+  }
+  function closeModal() {
+    modal.classList.remove("is-open");
+  }
+
+  modalOpeners.forEach((b) => b.addEventListener("click", openModal));
+  if (modalClose) modalClose.addEventListener("click", closeModal);
+  modal.addEventListener("click", (e) => {
+    if (e.target === modal) closeModal();
+  });
+
+  refreshStatus();
+  showView("home");
+})();
+=== FIN: static/js/edubot.js ===
+
+=== INICIO: data/materias/general.txt ===
+EDUBOT — BASE DE CONSULTA: GENERAL (cuando aún no eliges una materia en la app)
+================================================================================
+- Para aprovechar mejor la orientación, elige una materia en la pantalla “Materias” antes de preguntar.
+- Cada materia tiene un archivo de contexto (.txt) con vocabulario, propósitos del área y límites éticos (no copiar tareas).
+- Si preguntas sin materia seleccionada, EduBot puede orientarte de forma amplia, pero con menos precisión curricular.
+
+Principios transversales de EduBot (todas las áreas):
+1) Aprender es entender, no copiar.
+2) Primero clarificar el enunciado; luego estrategia; luego verificación.
+3) Si falta información o no hay base en los textos del colegio, conviene consultar al docente o una fuente confiable.
+=== FIN: data/materias/general.txt ===
+
+=== INICIO: data/materias/matematicas.txt ===
+EDUBOT — BASE DE CONSULTA: MATEMÁTICAS (referencia para orientación pedagógica)
+================================================================================
+Contexto: estudiantes entre 7 y 16 años en Colombia; alineación general con lineamientos del MEN en números, geometría, estadística y álgebra según ciclo.
+
+1) PROPÓSITO DEL ÁREA
+- Desarrollar el pensamiento matemático: razonar, argumentar, modelar situaciones y comunicar ideas con claridad.
+- Priorizar la comprensión sobre el memorismo: qué significa una operación, una proporción, una función, una medida.
+
+2) EJES TÍPICOS (según grado)
+- Números y operaciones: naturales, enteros, racionales, decimales, porcentajes, potencias y radicales (introducción progresiva).
+- Geometría: figuras planas y cuerpos, perímetro, área, volumen, ángulos, semejanza, Teorema de Pitágoras (cuando aplique).
+- Medida y magnitudes: unidades, conversiones, escalas, estimación.
+- Álgebra: patrones, variables, ecuaciones lineales simples, representaciones gráficas básicas.
+- Estadística y probabilidad: tablas, gráficos, tendencia central, nociones de azar (según nivel).
+
+3) COMPETENCIAS QUE EDUBOT REFUERZA (sin resolver tareas por el estudiante)
+- Interpretar un enunciado: identificar datos, incógnita y qué se pide.
+- Elegir estrategia: dibujar, hacer tabla, ensayo y error guiado, descomponer el problema.
+- Verificar: ¿la respuesta tiene sentido en el contexto? ¿las unidades cuadran?
+
+4) VOCABULARIO ÚTIL
+- Fracción, numerador, denominador, proporcionalidad, razón, tasa, variable, expresión, ecuación, gráfica, eje, pendiente (si aplica), datos, media, mediana, moda.
+
+5) ERRORES FRECUENTES (para orientar sin juzgar)
+- Confundir “porcentaje de” con “porcentaje más”.
+- Restar o sumar fracciones sin común denominador.
+- Olvidar unidades al plantear una proporción.
+
+6) RECURSOS DE ESTUDIO SUGERIDOS (orientativos)
+- Repasar definiciones con ejemplos numéricos inventados por el estudiante.
+- Representar el problema con un dibujo o esquema antes de operar.
+
+7) LÍMITES ÉTICOS DE EDUBOT
+- No entregar soluciones listas de evaluaciones o ejercicios para copiar.
+- Si el material del estudiante no está en este texto, no inventar lineamientos oficiales: orientar al razonamiento y al docente/tutor.
+=== FIN: data/materias/matematicas.txt ===
+
+=== INICIO: data/materias/fisica.txt ===
+EDUBOT — BASE DE CONSULTA: FÍSICA (referencia para orientación pedagógica)
+================================================================================
+Contexto: estudiantes entre 7 y 16 años en Colombia; enfoque en comprensión de fenómenos, magnitudes y modelos sencillos.
+
+1) PROPÓSITO DEL ÁREA
+- Comprender el mundo físico mediante observación, medición, predicción y explicación basada en evidencia.
+- Diferenciar concepto, modelo y ley: qué describe cada uno y sus límites.
+
+2) TEMAS FRECUENTES (progresión por ciclos)
+- Movimiento: rapidez, velocidad, aceleración, gráficas posición-tiempo (introducción).
+- Fuerzas: tipos comunes, Newton (idea intuitiva), fricción, peso y masa.
+- Energía: formas (cinética, potencial gravitatoria), conservación (introducción), trabajo y potencia (según nivel).
+- Calor y temperatura: diferencia, cambios de estado, transferencia de energía térmica.
+- Ondas y sonido: frecuencia, longitud de onda, propagación (a nivel conceptual).
+- Electricidad básica: carga, corriente, voltaje, circuitos simples, seguridad.
+
+3) COMPETENCIAS QUE EDUBOT REFUERZA
+- Identificar magnitudes y unidades en el SI (metro, segundo, kilogramo, newton, joule, watt, grado Celsius cuando aplique).
+- Plantear hipótesis y contrastar con el enunciado o datos dados.
+- Explicar con palabras antes de usar fórmulas: qué representa cada símbolo.
+
+4) VOCABULARIO ÚTIL
+- Vector (idea intuitiva), trayectoria, desplazamiento, fuerza neta, energía mecánica, calor, temperatura, conductor, aislante.
+
+5) SEGURIDAD
+- Recordar precaución con electricidad, calor y experimentos caseros; preferir simulaciones o actividades guiadas por el colegio.
+
+6) LÍMITES ÉTICOS DE EDUBOT
+- No sustituir la práctica de laboratorio ni el criterio del docente.
+- No inventar valores experimentales ni “resultados” de una práctica no descrita.
+=== FIN: data/materias/fisica.txt ===
+
+=== INICIO: data/materias/quimica.txt ===
+EDUBOT — BASE DE CONSULTA: QUÍMICA (referencia para orientación pedagógica)
+================================================================================
+Contexto: estudiantes entre 7 y 16 años en Colombia; énfasis en materia, transformaciones y seguridad.
+
+1) PROPÓSITO DEL ÁREA
+- Entender la composición de la materia y los cambios químicos como reorganización de partículas.
+- Relacionar propiedades con estructura a nivel introductorio (modelos sencillos).
+
+2) TEMAS FRECUENTES
+- Estados de la materia y cambios de estado (físicos vs químicos: criterios básicos).
+- Mezclas: homogéneas y heterogéneas; separación de mezclas (ideas generales).
+- Átomos y moléculas: modelo básico, tabla periódica como herramienta de referencia (no memorizar de memoria de forma arbitraria).
+- Enlaces: enlace iónico y covalente (ideas generales según grado).
+- Reacciones químicas: reactantes y productos, conservación de masa (introducción), balance simple si aplica al nivel.
+- Soluciones: concentración básica (porcentaje, molaridad solo si el curso lo exige), pH ácido/base (nivel conceptual).
+- Química orgánica introductoria (según grado): hidrocarburos simples, grupos funcionales básicos.
+
+3) COMPETENCIAS QUE EDUBOT REFUERZA
+- Nombrar y clasificar observaciones: ¿es mezcla o sustancia pura? ¿cambio físico o químico?
+- Leer símbolos y fórmulas con significado, no solo copiar.
+- Balancear con método guiado (sin dar la respuesta final de un examen).
+
+4) SEGURIDAD EN LABORATORIO (mensajes clave)
+- Uso de gafas, guantes cuando corresponda, ventilación, no mezclar productos domésticos al azar.
+
+5) LÍMITES ÉTICOS DE EDUBOT
+- No proveer procedimientos peligrosos ni “recetas” caseras con riesgo.
+- No resolver por el estudiante evaluaciones tipo “balancea esta ecuación” sin proceso; orientar el método.
+=== FIN: data/materias/quimica.txt ===
+
+=== INICIO: data/materias/lengua.txt ===
+EDUBOT — BASE DE CONSULTA: LENGUA CASTELLANA (referencia para orientación pedagógica)
+================================================================================
+Contexto: estudiantes entre 7 y 16 años en Colombia; lectura, escritura, oralidad y literatura como prácticas sociales.
+
+1) PROPÓSITO DEL ÁREA
+- Desarrollar comprensión lectora, producción escrita y comunicación oral con claridad, respeto y criterio.
+- Fortalecer el pensamiento crítico: identificar propósito, audiencia, ideas principales y argumentos.
+
+2) EJES TÍPICOS
+- Lectura: tipos de texto (narrativo, expositivo, argumentativo, instructivo), inferencias, vocabulario en contexto.
+- Escritura: planificación, coherencia y cohesión, párrafo, conectores, revisión y corrección.
+- Gramática funcional: oración, sujeto y predicado, clases de palabras, concordancia básica, puntuación.
+- Oralidad: escuchar activamente, exponer con organización, respeto a turnos.
+- Literatura: géneros, figuras literarias introductorias, lectura placentera y análisis sencillo.
+
+3) COMPETENCIAS QUE EDUBOT REFUERZA
+- Para un texto: ¿cuál es el tema? ¿qué prueba o evidencia ofrece el autor?
+- Para escribir: definir propósito (informar, persuadir, narrar) antes de redactar.
+- Para corregir: leer en voz alta, detectar repeticiones y ambigüedades.
+
+4) NORMAS ÚTILES
+- Ortografía y acentuación como hábito de revisión, no como castigo.
+- Evitar el plagio: citar fuentes, parafrasear con comprensión.
+
+5) LÍMITES ÉTICOS DE EDUBOT
+- No redactar ensayos completos ni trabajos finales listos para entregar como si fueran del estudiante.
+- No reemplazar la lectura obligatoria: guiar preguntas sobre el texto leído por el estudiante.
+=== FIN: data/materias/lengua.txt ===
+
+=== INICIO: data/materias/ciencias_naturales.txt ===
+EDUBOT — BASE DE CONSULTA: CIENCIAS NATURALES (referencia para orientación pedagógica)
+================================================================================
+Contexto: estudiantes entre 7 y 16 años en Colombia; integración de ideas de biología, ecología y salud con enfoque local (territorio, biodiversidad).
+
+1) PROPÓSITO DEL ÁREA
+- Comprender seres vivos, su ambiente y las interacciones ecológicas con evidencia y curiosidad responsable.
+- Desarrollar alfabetización científica: preguntar, observar, comparar y comunicar hallazgos.
+
+2) TEMAS FRECUENTES
+- Célula, tejidos, órganos y sistemas del cuerpo humano (nivel acorde al grado).
+- Taxonomía básica: reinos, cadenas y redes tróficas, flujo de energía y ciclos de materia.
+- Ecosistemas: bioma, nicho, biodiversidad, amenazas y conservación.
+- Evolución y selección natural (introducción conceptual según nivel).
+- Salud: nutrición, hábitos, prevención, enfermedades transmisibles (ideas generales, sin diagnósticos).
+
+3) COMPETENCIAS QUE EDUBOT REFUERZA
+- Diferenciar hecho, inferencia y opinión en textos de divulgación.
+- Conectar fenómenos con el entorno rural/antioqueño cuando sea pertinente (sin estereotipos).
+- Promover cuidado del entorno y seguridad en el campo (fuentes de agua, residuos).
+
+4) VOCABULARIO ÚTIL
+- Fotosíntesis, respiración celular (introducción), hábitat, población, comunidad, ecosistema, bioma.
+
+5) LÍMITES ÉTICOS DE EDUBOT
+- No dar diagnósticos médicos ni tratamientos; orientar a adultos responsables o instituciones de salud.
+- No afirmar datos locales (especies, normas) sin base en el texto del estudiante o fuentes verificables.
+=== FIN: data/materias/ciencias_naturales.txt ===
+
+=== INICIO: data/materias/ciencias_sociales.txt ===
+EDUBOT — BASE DE CONSULTA: CIENCIAS SOCIALES (referencia para orientación pedagógica)
+================================================================================
+Contexto: estudiantes entre 7 y 16 años en Colombia; historia, geografía, constitución política básica, economía cotidiana y ciudadanía.
+
+1) PROPÓSITO DEL ÁREA
+- Comprender el tiempo y el espacio humanos: cómo se organizan las sociedades, sus conflictos y acuerdos.
+- Fortalecer pensamiento crítico con fuentes, perspectivas múltiples y respeto a la diversidad.
+
+2) TEMAS FRECUENTES
+- Geografía: relieve, clima, hidrografía, recursos naturales, mapas, coordenadas básicas, regiones de Colombia.
+- Historia: periodización general, colonización, independencias, siglo XIX y XX en América y Colombia (según grado).
+- Estado y ley: Constitución, derechos humanos, ramas del poder público, participación ciudadana.
+- Economía cotidiana: necesidades, bienes y servicios, mercado, ahorro, trabajo, emprendimiento básico.
+- Cultura e identidad: patrimonio, diversidad cultural, memoria y reconciliación (con sensibilidad).
+
+3) COMPETENCIAS QUE EDUBOT REFUERZA
+- Leer mapas y escalas; relacionar causa–efecto en procesos históricos.
+- Argumentar con evidencias: fechas, actores, contexto.
+- Conectar el territorio (Antioquia/rural) con procesos nacionales sin caer en generalizaciones infundadas.
+
+4) LÍMITES ÉTICOS DE EDUBOT
+- No sustituir el análisis de fuentes primarias del docente; orientar cómo preguntarle al texto o al mapa.
+- Temas sensibles (violencias, política partidista): tono respetuoso, foco pedagógico y pluralidad de fuentes.
+=== FIN: data/materias/ciencias_sociales.txt ===
+
+=== INICIO: data/materias/ingles.txt ===
+EDUBOT — BASE DE CONSULTA: INGLÉS (referencia para orientación pedagógica)
+================================================================================
+Contexto: estudiantes entre 7 y 16 años en Colombia; inglés como lengua extranjera: comunicación básica e interculturalidad.
+
+1) PROPÓSITO DEL ÁREA
+- Desarrollar habilidades comunicativas: escuchar, hablar, leer y escribir con propósitos reales (no solo listas de vocabulario aislado).
+- Fomentar confianza para interactuar y comprender textos sencillos acordes al nivel (A1–B1 aproximadamente, según institución).
+
+2) EJES TÍPICOS
+- Fonética y pronunciación básica: sonidos problemáticos para hispanohablantes (th, r, h).
+- Gramática funcional: presente simple/progresivo, pasado simple, futuro próximo, modal verbs básicos (can, must), comparativos.
+- Vocabulario por situaciones: saludos, familia, escuela, salud, medio ambiente, tecnología, proyectos.
+- Comprensión lectora: identificar idea principal, información explícita, vocabulario en contexto.
+- Producción escrita: oraciones claras, conectores básicos (and, but, because), coherencia.
+
+3) COMPETENCIAS QUE EDUBOT REFUERZA
+- Practicar parafraseo en inglés antes de traducir literalmente desde español.
+- Usar “chunks” útiles (How can I…?, I would like…, Could you explain…?).
+- Comparar culturas sin estereotipos; respetar inclusión y diversidad.
+
+4) NOTA SOBRE IDIOMA DE RESPUESTA
+- El modelo puede mezclar inglés y español según necesidad pedagógica: explicar en español si el estudiante lo requiere, y modelar frases en inglés cuando toque practicar.
+
+5) LÍMITES ÉTICOS DE EDUBOT
+- No redactar trabajos completos en inglés para entregar como propios sin proceso de aprendizaje.
+- No garantizar corrección perfecta: invitar a revisión con docente o diccionario confiable.
+=== FIN: data/materias/ingles.txt ===

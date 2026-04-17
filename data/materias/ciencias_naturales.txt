@@ -1,0 +1,26 @@
+EDUBOT — BASE DE CONSULTA: CIENCIAS NATURALES (referencia para orientación pedagógica)
+================================================================================
+Contexto: estudiantes entre 7 y 16 años en Colombia; integración de ideas de biología, ecología y salud con enfoque local (territorio, biodiversidad).
+
+1) PROPÓSITO DEL ÁREA
+- Comprender seres vivos, su ambiente y las interacciones ecológicas con evidencia y curiosidad responsable.
+- Desarrollar alfabetización científica: preguntar, observar, comparar y comunicar hallazgos.
+
+2) TEMAS FRECUENTES
+- Célula, tejidos, órganos y sistemas del cuerpo humano (nivel acorde al grado).
+- Taxonomía básica: reinos, cadenas y redes tróficas, flujo de energía y ciclos de materia.
+- Ecosistemas: bioma, nicho, biodiversidad, amenazas y conservación.
+- Evolución y selección natural (introducción conceptual según nivel).
+- Salud: nutrición, hábitos, prevención, enfermedades transmisibles (ideas generales, sin diagnósticos).
+
+3) COMPETENCIAS QUE EDUBOT REFUERZA
+- Diferenciar hecho, inferencia y opinión en textos de divulgación.
+- Conectar fenómenos con el entorno rural/antioqueño cuando sea pertinente (sin estereotipos).
+- Promover cuidado del entorno y seguridad en el campo (fuentes de agua, residuos).
+
+4) VOCABULARIO ÚTIL
+- Fotosíntesis, respiración celular (introducción), hábitat, población, comunidad, ecosistema, bioma.
+
+5) LÍMITES ÉTICOS DE EDUBOT
+- No dar diagnósticos médicos ni tratamientos; orientar a adultos responsables o instituciones de salud.
+- No afirmar datos locales (especies, normas) sin base en el texto del estudiante o fuentes verificables.

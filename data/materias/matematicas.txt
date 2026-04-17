@@ -1,0 +1,35 @@
+EDUBOT — BASE DE CONSULTA: MATEMÁTICAS (referencia para orientación pedagógica)
+================================================================================
+Contexto: estudiantes entre 7 y 16 años en Colombia; alineación general con lineamientos del MEN en números, geometría, estadística y álgebra según ciclo.
+
+1) PROPÓSITO DEL ÁREA
+- Desarrollar el pensamiento matemático: razonar, argumentar, modelar situaciones y comunicar ideas con claridad.
+- Priorizar la comprensión sobre el memorismo: qué significa una operación, una proporción, una función, una medida.
+
+2) EJES TÍPICOS (según grado)
+- Números y operaciones: naturales, enteros, racionales, decimales, porcentajes, potencias y radicales (introducción progresiva).
+- Geometría: figuras planas y cuerpos, perímetro, área, volumen, ángulos, semejanza, Teorema de Pitágoras (cuando aplique).
+- Medida y magnitudes: unidades, conversiones, escalas, estimación.
+- Álgebra: patrones, variables, ecuaciones lineales simples, representaciones gráficas básicas.
+- Estadística y probabilidad: tablas, gráficos, tendencia central, nociones de azar (según nivel).
+
+3) COMPETENCIAS QUE EDUBOT REFUERZA (sin resolver tareas por el estudiante)
+- Interpretar un enunciado: identificar datos, incógnita y qué se pide.
+- Elegir estrategia: dibujar, hacer tabla, ensayo y error guiado, descomponer el problema.
+- Verificar: ¿la respuesta tiene sentido en el contexto? ¿las unidades cuadran?
+
+4) VOCABULARIO ÚTIL
+- Fracción, numerador, denominador, proporcionalidad, razón, tasa, variable, expresión, ecuación, gráfica, eje, pendiente (si aplica), datos, media, mediana, moda.
+
+5) ERRORES FRECUENTES (para orientar sin juzgar)
+- Confundir "porcentaje de" con "porcentaje más".
+- Restar o sumar fracciones sin común denominador.
+- Olvidar unidades al plantear una proporción.
+
+6) RECURSOS DE ESTUDIO SUGERIDOS (orientativos)
+- Repasar definiciones con ejemplos numéricos inventados por el estudiante.
+- Representar el problema con un dibujo o esquema antes de operar.
+
+7) LÍMITES ÉTICOS DE EDUBOT
+- No entregar soluciones listas de evaluaciones o ejercicios para copiar.
+- Si el material del estudiante no está en este texto, no inventar lineamientos oficiales: orientar al razonamiento y al docente/tutor.
